@@ -11,7 +11,12 @@
   header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; background:#121720; border-bottom:1px solid #29313d; }
   header h1 { margin:0 12px 0 0; font-size:17px; font-weight:700; }
   .hint { color:#aab5c4; }
-  button, input { color:#f4f7fb; background:#202835; border:1px solid #3a4657; border-radius:8px; padding:8px 10px; font:inherit; }
+  button, input, select, textarea { color:#f4f7fb; background:#202835; border:1px solid #3a4657; border-radius:8px; padding:8px 10px; font:inherit; }
+  #raidImport { width:100%; min-height:80px; resize:vertical; margin:6px 0; }
+  .import-roster { margin-bottom:12px; }
+  #importStatus[data-error="true"] { color:#ff7c8e; }
+  #playerClass { width:100%; margin:5px 0 8px; }
+  .roster-class { color:#9eabba; font-size:11px; }
   button { cursor:pointer; } button:hover { background:#2b3748; }
   .app { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:12px; padding:12px; align-items:start; }
   #stage { position:relative; width:100%; aspect-ratio:1648/928; overflow:hidden; background:#171b22; border:1px solid #384252; border-radius:10px; touch-action:none; user-select:none; }
@@ -59,8 +64,18 @@
       <input id="newName" placeholder="Add player name…" maxlength="32" aria-label="New player name" required>
       <button type="submit">Add</button>
     </form>
+    <form id="importForm" class="import-roster">
+      <label for="raidImport">Import WoW raid roster</label>
+      <textarea id="raidImport" placeholder="PlayerName:#3fc7eb,OtherPlayer:#ffffff," maxlength="10000" aria-describedby="importHint" required></textarea>
+      <button type="submit">Import roster</button>
+      <p class="small" id="importHint">Paste the macro output. New players are added; matching players keep their positions and receive the imported color.</p>
+      <p class="small" id="importStatus" role="status" aria-live="polite"></p>
+    </form>
+    <label for="playerClass">Player class</label>
+    <select id="playerClass" aria-describedby="classHint"></select>
+    <p class="small" id="classHint">Select a player and choose their class to apply its color. Your choice also applies to new players.</p>
     <div id="color-list" role="group" aria-label="Player color palette"></div>
-    <p class="small">Choose a color for the selected player or the next player you add.</p>
+    <p class="small">Choose a palette color to use a custom color instead.</p>
     <div id="roster"></div>
     <div class="footer-actions">
       <button id="rename">Rename selected</button>
@@ -78,17 +93,81 @@ const roster = document.getElementById('roster');
 const palette = ['#43c9ff','#ffd15c','#c1f36a','#ff7c8e','#b79cff','#63e6a5','#ffad66'];
 const colorNames = ['Blue','Yellow','Lime','Pink','Purple','Green','Orange'];
 let chosenColor = palette[0];
+const wowClasses = {
+  DEATHKNIGHT:{name:'Death Knight',color:'#c41e3a'},
+  DRUID:{name:'Druid',color:'#ff7c0a'},
+  HUNTER:{name:'Hunter',color:'#aad372'},
+  MAGE:{name:'Mage',color:'#3fc7eb'},
+  PALADIN:{name:'Paladin',color:'#f48cba'},
+  PRIEST:{name:'Priest',color:'#ffffff'},
+  ROGUE:{name:'Rogue',color:'#fff468'},
+  SHAMAN:{name:'Shaman',color:'#0070dd'},
+  WARLOCK:{name:'Warlock',color:'#8788ee'},
+  WARRIOR:{name:'Warrior',color:'#c69b6d'}
+};
+let chosenClass = '';
+const classSelect = document.getElementById('playerClass');
+for(const [value,label] of [['','Custom color'],...Object.entries(wowClasses).map(([key,info])=>[key,info.name])]){
+  const option=document.createElement('option'); option.value=value; option.textContent=label; classSelect.appendChild(option);
+}
 let players = initialPlayers.map((p,i)=>({...p,id:crypto.randomUUID(),color:palette[i%palette.length]}));
 let selectedId = null, drag = null;
 try {
   const saved = localStorage.getItem('raid-player-layout-v1');
   if (saved) {
     const parsed = JSON.parse(saved);
-    if (Array.isArray(parsed) && parsed.length) players = parsed;
+    if (Array.isArray(parsed) && parsed.length) players = parsed.map(p=>({...p,color:p.color||wowClasses[p.class]?.color}));
   }
 } catch(e) {}
 function save(){ try { localStorage.setItem('raid-player-layout-v1', JSON.stringify(players)); } catch(e){} }
-function select(id){ selectedId=id; const player=players.find(p=>p.id===id); if(player) chosenColor=player.color||palette[0]; renderRoster(); renderPalette(); stage.querySelectorAll('.token').forEach(t=>t.classList.toggle('selected',t.dataset.id===id)); }
+// Older WoW clients use slightly different class hex values. Keep the exported color.
+const classicClassColors = {
+  '#abd473':'HUNTER','#69ccf0':'MAGE','#9482c9':'WARLOCK',
+  '#0070de':'SHAMAN','#c79c6e':'WARRIOR'
+};
+function parseRaidRoster(text){
+  if(text.length>10000) throw new Error('Roster is too long. Paste up to 40 players.');
+  const entries=text.split(/[,\r\n]+/).map(entry=>entry.trim()).filter(Boolean);
+  if(!entries.length) throw new Error('Paste the WoW macro output first.');
+  if(entries.length>40) throw new Error('Import up to 40 players at a time.');
+  const unique=new Map();
+  entries.forEach((entry,index)=>{
+    const match=/^([^:]+):\s*(#[0-9a-f]{6})$/i.exec(entry);
+    if(!match) throw new Error('Entry '+(index+1)+' must look like PlayerName:#3fc7eb.');
+    const name=match[1].trim(),color=match[2].toLowerCase();
+    if(!name || name.length>64 || /[\x00-\x1f\x7f]/.test(name)) throw new Error('Invalid player name in entry '+(index+1)+'.');
+    const playerClass=Object.keys(wowClasses).find(key=>wowClasses[key].color===color)||classicClassColors[color]||'';
+    unique.set(name.toLowerCase(),{name,color,class:playerClass});
+  });
+  return Array.from(unique.values());
+}
+document.getElementById('importForm').addEventListener('submit',e=>{
+  e.preventDefault();
+  const status=document.getElementById('importStatus');
+  try {
+    const imported=parseRaidRoster(document.getElementById('raidImport').value);
+    let added=0,updated=0;
+    imported.forEach((entry,index)=>{
+      const existing=players.find(player=>player.name.toLowerCase()===entry.name.toLowerCase());
+      if(existing){ existing.color=entry.color; existing.class=entry.class; updated++; }
+      else {
+        players.push({...entry,id:crypto.randomUUID(),x:12+(index%5)*19,y:12+Math.floor(index/5)*10});
+        added++;
+      }
+    });
+    drag=null; save(); render();
+    status.dataset.error='false';
+    status.textContent='Imported roster: '+added+' added, '+updated+' updated.';
+  } catch(error){ status.dataset.error='true'; status.textContent=error.message; }
+});
+function select(id){ selectedId=id; const player=players.find(p=>p.id===id); if(player){ chosenColor=player.color||palette[0]; chosenClass=wowClasses[player.class]?player.class:''; } classSelect.value=chosenClass; renderRoster(); renderPalette(); stage.querySelectorAll('.token').forEach(t=>t.classList.toggle('selected',t.dataset.id===id)); }
+classSelect.addEventListener('change',()=>{
+  chosenClass=classSelect.value;
+  if(wowClasses[chosenClass]) chosenColor=wowClasses[chosenClass].color;
+  const player=players.find(p=>p.id===selectedId);
+  if(player){ player.class=chosenClass; player.color=chosenColor; save(); render(); }
+  else renderPalette();
+});
 function renderPalette(){
   const list=document.getElementById('color-list');
   list.replaceChildren();
@@ -100,9 +179,11 @@ function renderPalette(){
     button.setAttribute('aria-pressed',String(color===chosenColor));
     button.addEventListener('click',()=>{
       chosenColor=color;
+      chosenClass=''; classSelect.value='';
       const player=players.find(p=>p.id===selectedId);
       if(player){
         player.color=color;
+        player.class='';
         const token=Array.from(stage.querySelectorAll('.token')).find(t=>t.dataset.id===player.id);
         if(token) token.style.setProperty('--token-color',color);
         save(); renderRoster();
@@ -153,13 +234,16 @@ function renderRoster(){
     const sw=document.createElement('span'); sw.className='swatch'; sw.style.background=p.color||palette[0];
     const name=document.createElement('span'); name.className='roster-name'; name.textContent=p.name;
     row.append(sw,name);
+    if(wowClasses[p.class]){
+      const label=document.createElement('span'); label.className='roster-class'; label.textContent=wowClasses[p.class].name; row.appendChild(label);
+    }
     row.addEventListener('click',()=>{select(p.id); const el=stage.querySelector('[data-id="'+p.id+'"]'); if(el) el.scrollIntoView({block:'nearest',inline:'nearest'});});
     roster.appendChild(row);
   });
 }
 document.getElementById('addForm').addEventListener('submit',e=>{
   e.preventDefault(); const name=document.getElementById('newName').value.trim(); if(!name)return;
-  const p={id:crypto.randomUUID(),name,x:50,y:50,color:chosenColor};
+  const p={id:crypto.randomUUID(),name,x:50,y:50,color:chosenColor,class:chosenClass};
   players.push(p); selectedId=p.id; document.getElementById('newName').value=''; save(); render();
 });
 document.getElementById('rename').onclick=()=>{
@@ -178,12 +262,12 @@ document.getElementById('reset').onclick=()=>{
   players=initialPlayers.map((p,i)=>({...p,id:crypto.randomUUID(),color:palette[i%palette.length]}));selectedId=null;save();render();
 };
 function exportJson(){
-  const blob=new Blob([JSON.stringify(players.map(({name,x,y,color})=>({name,x,y,color})),null,2)],{type:'application/json'});
+  const blob=new Blob([JSON.stringify(players.map(({name,x,y,color,class:playerClass})=>({name,x,y,color,class:playerClass})),null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='raid-player-layout.json';a.click();URL.revokeObjectURL(url);
 }
 document.getElementById('download').onclick=exportJson;
 document.getElementById('export').onclick=()=>{
-  const txt=JSON.stringify(players.map(({name,x,y,color})=>({name,x,y,color})),null,2);
+  const txt=JSON.stringify(players.map(({name,x,y,color,class:playerClass})=>({name,x,y,color,class:playerClass})),null,2);
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>alert('Layout JSON copied to clipboard.')).catch(exportJson);
   else exportJson();
 };
