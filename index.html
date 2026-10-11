@@ -14,7 +14,11 @@
   button, input, select, textarea { color:#f4f7fb; background:#202835; border:1px solid #3a4657; border-radius:8px; padding:8px 10px; font:inherit; }
   #raidImport { width:100%; min-height:80px; resize:vertical; margin:6px 0; }
   .import-roster { margin-bottom:12px; }
-  #importStatus[data-error="true"] { color:#ff7c8e; }
+  #importStatus[data-error="true"], #layoutStatus[data-error="true"] { color:#ff7c8e; }
+  #layoutText { width:100%; min-height:90px; resize:vertical; margin:6px 0; }
+  #layoutFile { width:100%; margin:6px 0; }
+  .layout-import { margin-top:12px; }
+  .layout-import summary { cursor:pointer; }
   #playerClass { width:100%; margin:5px 0 8px; }
   .roster-class { color:#9eabba; font-size:11px; }
   button { cursor:pointer; } button:hover { background:#2b3748; }
@@ -89,7 +93,19 @@
       <button id="remove-all">Remove All</button>
       <button id="download">Download JSON</button>
     </div>
-    <p class="small">Export layout copies all player names and map positions as JSON. You can reload it later using the exported file as a reference.</p>
+    <details class="layout-import">
+      <summary>Import JSON layout</summary>
+      <p class="small">Load a saved JSON file or paste exported JSON below. Importing replaces the current layout, including players and bosses.</p>
+      <label for="layoutFile">Choose JSON file</label>
+      <input id="layoutFile" type="file" accept=".json,application/json">
+      <form id="layoutForm">
+        <label for="layoutText">Or paste layout JSON</label>
+        <textarea id="layoutText" placeholder='[{"name":"Player","x":50,"y":50,"color":"#3fc7eb"}]' maxlength="1000000" required></textarea>
+        <button type="submit">Load layout</button>
+      </form>
+      <p id="layoutStatus" class="small" role="status" aria-live="polite"></p>
+    </details>
+    <p class="small">Export layout copies the layout as JSON. Download JSON saves a file you can restore with Import JSON layout.</p>
   </aside>
 </div>
 <script>
@@ -279,6 +295,47 @@ document.getElementById('reset').onclick=()=>{
   if(!confirm('Reset all player positions and names to the original layout?'))return;
   players=initialPlayers.map((p,i)=>({...p,id:crypto.randomUUID(),color:palette[i%palette.length]}));selectedId=null;save();render();
 };
+function parseJsonLayout(text){
+  if(text.length>1000000) throw new Error('Layout must be smaller than 1 MB.');
+  let data;
+  try { data=JSON.parse(text); } catch(error){ throw new Error('Invalid JSON. Paste the complete exported layout or choose its JSON file.'); }
+  if(!Array.isArray(data)) throw new Error('Layout must be a JSON array of players and bosses.');
+  if(data.length>500) throw new Error('Layout can contain up to 500 markers.');
+  return data.map((entry,index)=>{
+    const invalid=message=>{throw new Error('Marker '+(index+1)+': '+message);};
+    if(!entry || typeof entry!=='object' || Array.isArray(entry)) invalid('expected a player or boss object.');
+    if(typeof entry.name!=='string' || !entry.name.trim() || entry.name.trim().length>64 || /[\x00-\x1f\x7f]/.test(entry.name)) invalid('name must contain 1–64 characters.');
+    if(!Number.isFinite(entry.x) || !Number.isFinite(entry.y) || entry.x<0 || entry.x>100 || entry.y<0 || entry.y>100) invalid('x and y must be numbers from 0 to 100.');
+    if(entry.kind!==undefined && entry.kind!=='player' && entry.kind!=='boss') invalid('kind must be player or boss.');
+    if(entry.class!==undefined && (typeof entry.class!=='string' || (entry.class!=='' && !Object.hasOwn(wowClasses,entry.class)))) invalid('unknown player class.');
+    const kind=entry.kind==='boss'?'boss':undefined;
+    const playerClass=kind==='boss'?'':entry.class||'';
+    const color=entry.color===undefined?(wowClasses[playerClass]?.color||(kind==='boss'?'#ff7c8e':palette[0])):entry.color;
+    if(typeof color!=='string' || !/^#[0-9a-f]{6}$/i.test(color)) invalid('color must be a hex color such as #3fc7eb.');
+    return {id:crypto.randomUUID(),name:entry.name.trim(),x:entry.x,y:entry.y,color:color.toLowerCase(),class:playerClass,...(kind?{kind}:{})};
+  });
+}
+function loadJsonLayout(text){
+  const status=document.getElementById('layoutStatus');
+  try {
+    const imported=parseJsonLayout(text);
+    players=imported; selectedId=null; drag=null; chosenClass=''; chosenColor=palette[0];
+    save(); render();
+    status.dataset.error='false'; status.textContent='Loaded layout: '+players.length+' markers.';
+  } catch(error){ status.dataset.error='true'; status.textContent=error.message; }
+}
+document.getElementById('layoutForm').addEventListener('submit',e=>{
+  e.preventDefault(); loadJsonLayout(document.getElementById('layoutText').value);
+});
+document.getElementById('layoutFile').addEventListener('change',async e=>{
+  const file=e.target.files[0]; if(!file) return;
+  const status=document.getElementById('layoutStatus');
+  try {
+    if(file.size>1000000) throw new Error('Layout must be smaller than 1 MB.');
+    loadJsonLayout(await file.text());
+  } catch(error){ status.dataset.error='true'; status.textContent=error.message||'Could not read the JSON file.'; }
+  finally { e.target.value=''; }
+});
 function exportJson(){
   const blob=new Blob([JSON.stringify(players.map(({name,x,y,color,class:playerClass,kind})=>({name,x,y,color,class:playerClass,kind})),null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='raid-player-layout.json';a.click();URL.revokeObjectURL(url);
