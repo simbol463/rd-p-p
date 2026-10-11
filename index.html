@@ -25,6 +25,8 @@
   .token:active { cursor:grabbing; z-index:5; }
   .token.selected { outline:2px solid white; outline-offset:2px; }
   .token .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--token-color,#4ac4ff); margin-right:5px; vertical-align:1px; }
+  .token.boss { display:flex; flex-direction:column; align-items:center; gap:3px; min-width:62px; padding:7px 10px; border-radius:12px; color:var(--token-color,#ff7c8e); }
+  .boss-icon { display:block; width:32px; height:32px; flex:none; }
   aside { background:var(--panel); border:1px solid #29313d; border-radius:10px; padding:12px; }
   aside h2 { font-size:14px; margin:0 0 10px; }
   .add { display:flex; gap:6px; margin-bottom:12px; } .add input { width:100%; min-width:0; }
@@ -48,8 +50,12 @@
   <h1>Raid Player Position Planner</h1>
   <span class="hint">Drag name markers around the map. Click a name to select it.</span>
   <span style="flex:1"></span>
+  <button id="addBoss">Add boss</button>
   <button id="reset">Reset positions</button>
   <button id="export">Export layout</button>
+  <button id="copyImage">Copy image</button>
+  <button id="downloadImage">Download PNG</button>
+  <span id="imageStatus" class="small" role="status" aria-live="polite"></span>
 </header>
 <div class="app">
   <main>
@@ -148,7 +154,7 @@ document.getElementById('importForm').addEventListener('submit',e=>{
     const imported=parseRaidRoster(document.getElementById('raidImport').value);
     let added=0,updated=0;
     imported.forEach((entry,index)=>{
-      const existing=players.find(player=>player.name.toLowerCase()===entry.name.toLowerCase());
+      const existing=players.find(player=>player.kind!=='boss' && player.name.toLowerCase()===entry.name.toLowerCase());
       if(existing){ existing.color=entry.color; existing.class=entry.class; updated++; }
       else {
         players.push({...entry,id:crypto.randomUUID(),x:12+(index%5)*19,y:12+Math.floor(index/5)*10});
@@ -160,7 +166,7 @@ document.getElementById('importForm').addEventListener('submit',e=>{
     status.textContent='Imported roster: '+added+' added, '+updated+' updated.';
   } catch(error){ status.dataset.error='true'; status.textContent=error.message; }
 });
-function select(id){ selectedId=id; const player=players.find(p=>p.id===id); if(player){ chosenColor=player.color||palette[0]; chosenClass=wowClasses[player.class]?player.class:''; } classSelect.value=chosenClass; renderRoster(); renderPalette(); stage.querySelectorAll('.token').forEach(t=>t.classList.toggle('selected',t.dataset.id===id)); }
+function select(id){ selectedId=id; const player=players.find(p=>p.id===id); if(player){ chosenColor=player.color||palette[0]; chosenClass=player.kind!=='boss' && wowClasses[player.class]?player.class:''; } classSelect.value=chosenClass; classSelect.disabled=player?.kind==='boss'; renderRoster(); renderPalette(); stage.querySelectorAll('.token').forEach(t=>t.classList.toggle('selected',t.dataset.id===id)); }
 classSelect.addEventListener('change',()=>{
   chosenClass=classSelect.value;
   if(wowClasses[chosenClass]) chosenColor=wowClasses[chosenClass].color;
@@ -196,9 +202,13 @@ function renderPalette(){
 function render(){
   stage.querySelectorAll('.token').forEach(t=>t.remove());
   players.forEach(p=>{
-    const el=document.createElement('div'); el.className='token'; el.dataset.id=p.id;
+    const el=document.createElement('div'); el.className='token'+(p.kind==='boss'?' boss':''); el.dataset.id=p.id;
     el.style.left=p.x+'%'; el.style.top=p.y+'%'; el.style.setProperty('--token-color',p.color||palette[0]);
-    el.innerHTML='<span class="dot"></span><span></span>'; el.lastElementChild.textContent=p.name;
+    el.innerHTML=p.kind==='boss'
+      ? '<svg class="boss-icon" viewBox="0 0 32 32" aria-hidden="true"><path fill="currentColor" d="M7 9 3 3l1 12 4 2v5l4 3v5h8v-5l4-3v-5l4-2 1-12-4 6C21 3 11 3 7 9Z"/><path fill="#0b0e13" d="m8 13 6 2-1 5-5-2Zm16 0-6 2 1 5 5-2Zm-8 6-3 5h6Zm-3 7h2v4h-2Zm4 0h2v4h-2Z"/></svg><span></span>'
+      : '<span class="dot"></span><span></span>';
+    el.lastElementChild.textContent=p.name;
+    el.setAttribute('aria-label',(p.kind==='boss'?'Boss: ':'Player: ')+p.name);
     el.title='Drag to move · Double-click to rename';
     el.addEventListener('pointerdown',e=>{
       if(e.button!==0) return;
@@ -241,6 +251,14 @@ function renderRoster(){
     roster.appendChild(row);
   });
 }
+document.getElementById('addBoss').onclick=()=>{
+  const bosses=players.filter(p=>p.kind==='boss');
+  let name='Boss',number=2;
+  while(bosses.some(p=>p.name===name)) name='Boss '+number++;
+  const boss={id:crypto.randomUUID(),kind:'boss',name,x:50+(bosses.length%3)*10,y:30+(Math.floor(bosses.length/3)%5)*10,color:'#ff7c8e',class:''};
+  players.push(boss);
+  selectedId=boss.id; save(); render();
+};
 document.getElementById('addForm').addEventListener('submit',e=>{
   e.preventDefault(); const name=document.getElementById('newName').value.trim(); if(!name)return;
   const p={id:crypto.randomUUID(),name,x:50,y:50,color:chosenColor,class:chosenClass};
@@ -262,12 +280,88 @@ document.getElementById('reset').onclick=()=>{
   players=initialPlayers.map((p,i)=>({...p,id:crypto.randomUUID(),color:palette[i%palette.length]}));selectedId=null;save();render();
 };
 function exportJson(){
-  const blob=new Blob([JSON.stringify(players.map(({name,x,y,color,class:playerClass})=>({name,x,y,color,class:playerClass})),null,2)],{type:'application/json'});
+  const blob=new Blob([JSON.stringify(players.map(({name,x,y,color,class:playerClass,kind})=>({name,x,y,color,class:playerClass,kind})),null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='raid-player-layout.json';a.click();URL.revokeObjectURL(url);
 }
+async function createLayoutImage(){
+  const map=document.getElementById('map');
+  if(map) await map.decode();
+  if(document.fonts) await document.fonts.ready;
+  const width=stage.clientWidth,height=stage.clientHeight;
+  if(!width || !height) throw new Error('The map must be visible to export an image.');
+  const canvas=document.createElement('canvas');
+  const scale=Math.max(1,1648/width);
+  canvas.width=Math.round(width*scale); canvas.height=Math.round(height*scale);
+  const ctx=canvas.getContext('2d');
+  if(!ctx) throw new Error('Image export is unavailable in this browser.');
+  ctx.scale(scale,scale);
+  ctx.fillStyle=getComputedStyle(stage).backgroundColor; ctx.fillRect(0,0,width,height);
+  if(map) ctx.drawImage(map,0,0,width,height);
+  const stageRect=stage.getBoundingClientRect();
+  const originX=stageRect.left+stage.clientLeft,originY=stageRect.top+stage.clientTop;
+  stage.querySelectorAll('.token').forEach(token=>{
+    const rect=token.getBoundingClientRect(),style=getComputedStyle(token);
+    const x=rect.left-originX,y=rect.top-originY,border=parseFloat(style.borderTopWidth)||2;
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(x+border/2,y+border/2,rect.width-border,rect.height-border,parseFloat(style.borderRadius));
+    ctx.shadowColor='#000b'; ctx.shadowBlur=9; ctx.shadowOffsetY=2;
+    ctx.fillStyle=style.backgroundColor; ctx.fill();
+    ctx.shadowColor='transparent'; ctx.strokeStyle=style.borderTopColor; ctx.lineWidth=border; ctx.stroke();
+    const dot=token.querySelector('.dot');
+    if(dot){
+      const dotRect=dot.getBoundingClientRect(); ctx.beginPath();
+      ctx.arc(dotRect.left-originX+dotRect.width/2,dotRect.top-originY+dotRect.height/2,dotRect.width/2,0,Math.PI*2);
+      ctx.fillStyle=getComputedStyle(dot).backgroundColor; ctx.fill();
+    }
+    const icon=token.querySelector('.boss-icon');
+    if(icon){
+      const iconRect=icon.getBoundingClientRect(); ctx.save();
+      ctx.translate(iconRect.left-originX,iconRect.top-originY); ctx.scale(iconRect.width/32,iconRect.height/32);
+      icon.querySelectorAll('path').forEach(path=>{
+        ctx.fillStyle=path.getAttribute('fill')==='currentColor'?style.color:path.getAttribute('fill');
+        ctx.fill(new Path2D(path.getAttribute('d')));
+      });
+      ctx.restore();
+    }
+    const label=token.lastElementChild,labelRect=label.getBoundingClientRect();
+    ctx.font=style.fontWeight+' '+style.fontSize+' '+style.fontFamily;
+    ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle=style.color;
+    ctx.fillText(label.textContent,labelRect.left-originX+labelRect.width/2,labelRect.top-originY+labelRect.height/2);
+    ctx.restore();
+  });
+  return new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('Could not create the PNG image.')),'image/png'));
+}
+function downloadLayoutImage(blob){
+  const url=URL.createObjectURL(blob),link=document.createElement('a');
+  link.href=url; link.download='raid-player-layout.png';
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function exportLayoutImage(copy){
+  const status=document.getElementById('imageStatus');
+  const buttons=[document.getElementById('copyImage'),document.getElementById('downloadImage')];
+  buttons.forEach(button=>button.disabled=true); status.textContent='Creating image…';
+  const png=createLayoutImage();
+  // Start the clipboard request during the click, before image decoding completes.
+  png.catch(()=>{});
+  try {
+    if(copy && navigator.clipboard?.write && typeof ClipboardItem!=='undefined'){
+      try {
+        await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);
+        status.textContent='Image copied. Paste into Discord with Ctrl+V.';
+        return;
+      } catch(error){ /* Download the same PNG if clipboard access is unavailable. */ }
+    }
+    downloadLayoutImage(await png);
+    status.textContent=copy?'Could not copy; PNG downloaded. Drag it into Discord.':'PNG downloaded. Drag it into Discord.';
+  } catch(error){ status.textContent=error.message||'Could not export the image. Please try again.'; }
+  finally { buttons.forEach(button=>button.disabled=false); }
+}
+document.getElementById('copyImage').onclick=()=>exportLayoutImage(true);
+document.getElementById('downloadImage').onclick=()=>exportLayoutImage(false);
 document.getElementById('download').onclick=exportJson;
 document.getElementById('export').onclick=()=>{
-  const txt=JSON.stringify(players.map(({name,x,y,color,class:playerClass})=>({name,x,y,color,class:playerClass})),null,2);
+  const txt=JSON.stringify(players.map(({name,x,y,color,class:playerClass,kind})=>({name,x,y,color,class:playerClass,kind})),null,2);
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>alert('Layout JSON copied to clipboard.')).catch(exportJson);
   else exportJson();
 };
